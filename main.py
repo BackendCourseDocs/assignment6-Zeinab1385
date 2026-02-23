@@ -237,36 +237,44 @@ def get_book(book_id: int, conn=Depends(get_db)):
 
 @app.get("/authors")
 def get_authors(q: str = Query(..., min_length=1, max_length=100), conn=Depends(get_db)):
-    ql = q.lower()
+    term = q.strip().lower()
+    pattern = f"%{term}%"
 
-    sql = """
-        SELECT author, COUNT(*) AS book_count
-        FROM books
-        WHERE LOWER(author) LIKE %s
-        GROUP BY author
-        ORDER BY book_count DESC, author ASC
-    """
+    combined = {}
+
     try:
         with conn.cursor() as cursor:
-            cursor.execute(sql, (f"%{ql}%",))
-            db_rows = cursor.fetchall()
+            cursor.execute(
+                """
+                SELECT author, COUNT(*) AS book_count
+                FROM books
+                WHERE LOWER(author) LIKE %s
+                GROUP BY author
+                """,
+                (pattern,),
+            )
+            for author, cnt in cursor.fetchall():
+                combined[("Database", author)] = int(cnt)
     except Exception:
         raise HTTPException(status_code=500, detail="Database query failed")
 
-    db_results = [{"author": r[0], "book_count": r[1], "source": "Database"} for r in db_rows]
-
-    ext_map = {}
     for b in seed_books:
-        a = b.get("author") or ""
-        if ql in a.lower():
-            ext_map[a] = ext_map.get(a, 0) + 1
-    ext_results = [{"author": a, "book_count": c, "source": "OpenLibrary"} for a, c in ext_map.items()]
+        author = (b.get("author") or "").strip()
+        if author and term in author.lower():
+            key = ("OpenLibrary", author)
+            combined[key] = combined.get(key, 0) + 1
 
-    results = db_results + ext_results
+    results = [
+        {"author": author, "book_count": count, "source": source}
+        for (source, author), count in combined.items()
+    ]
+
+    results.sort(key=lambda x: (-x["book_count"], x["author"]))
+
     if not results:
         raise HTTPException(status_code=404, detail="No authors found")
-    return {"query": q, "results": results}
 
+    return {"query": q, "results": results}
 
 @app.post("/books", status_code=201)
 def add_book(
